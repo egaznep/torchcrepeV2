@@ -2,33 +2,28 @@ from __future__ import division
 from __future__ import print_function
 
 import numpy as np
+import torch
+
+CENTS_MAPPING = torch.linspace(0, 7180, 360) + 1997.3794084376191
 
 
-def to_local_average_cents(salience, center=None):
+def to_local_average_cents(salience, center=None, fmin=None, fmax=None):
     """
     find the weighted average cents near the argmax bin
     """
-
-    if not hasattr(to_local_average_cents, 'cents_mapping'):
-        # the bin number-to-cents mapping
-        to_local_average_cents.cents_mapping = (
-                np.linspace(0, 7180, 360) + 1997.3794084376191)
-
-    if salience.ndim == 1:
-        if center is None:
-            center = int(np.argmax(salience))
-        start = max(0, center - 4)
-        end = min(len(salience), center + 5)
-        salience = salience[start:end]
-        product_sum = np.sum(
-            salience * to_local_average_cents.cents_mapping[start:end])
-        weight_sum = np.sum(salience)
-        return product_sum / weight_sum
-    if salience.ndim == 2:
-        return np.array([to_local_average_cents(salience[i, :]) for i in
-                         range(salience.shape[0])])
-
-    raise Exception("label should be either 1d or 2d ndarray")
+    if fmin is not None or fmax is not None:
+        pass
+    probs = torch.nn.functional.sigmoid(salience)
+    indices = salience.argmax(dim=-1)
+    start = torch.clamp(indices - 4, min=0).unsqueeze(1)
+    end = torch.clamp(indices + 5, max=salience.shape[-1]).unsqueeze(1)
+    muster = torch.arange(salience.shape[1], device=salience.device).unsqueeze(0)
+    mask = torch.where(muster < end, start <= muster, 0)
+    
+    weights_sum = (mask * probs).sum(dim=-1)
+    product_sum = (CENTS_MAPPING.to(device=salience.device) * mask * probs).sum(dim=-1)
+    
+    return product_sum / weights_sum
 
 
 def to_viterbi_cents(salience):

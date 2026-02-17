@@ -6,12 +6,13 @@ from .crepe_model import TorchCrepe
 from .utils import to_viterbi_cents, to_local_average_cents
 import os
 
-class TorchCrepePredictor:
+class TorchCrepePredictor(torch.nn.Module):
     """
     General TorchCrepe Predictor.
     Empirical observation finds that CPU inference is slow, better to use ONNX runtime for CPU scenario.
     """
     def __init__(self, device="cuda"):
+        super().__init__()
         self.model = TorchCrepe()
         self.model.load_state_dict(torch.load(os.path.join(os.path.dirname(os.path.realpath(__file__)), "assets/model-full-crepe.pt")))
         self.model.eval()
@@ -20,7 +21,7 @@ class TorchCrepePredictor:
         if self.device == "cuda":
             self.model.cuda()
 
-    def predict(self, audio, sr=16000, viterbi=True, center=True, step_size=10):
+    def predict(self, audio: torch.Tensor, sr=16000, viterbi=True, center=True, step_size=10, fmin=None, fmax=None):
         """
         Perform pitch estimation on given audio
 
@@ -62,32 +63,31 @@ class TorchCrepePredictor:
         
         # make 1024-sample frames of the audio with hop length of 10 milliseconds
         if center:
-            x = np.pad(audio, 512, mode='constant', constant_values=0)
+            audio = torch.nn.functional.pad(audio, (512, 512))
+
         hop_length = int(sr * step_size / 1000)     # step_size = int(1000 * 160 / 16000)
-        n_frames = 1 + int((len(x) - 1024) / hop_length)
-        frames = as_strided(x, shape=(1024, n_frames),
-                            strides=(x.itemsize, hop_length * x.itemsize))
-        frames = frames.transpose().copy()
+        frames = audio.unfold(dimension=0, size=1024, step=hop_length).clone()
 
         # normalize each frame -- this is expected by the model
-        frames -= np.mean(frames, axis=1)[:, np.newaxis]
-        frames /= np.std(frames, axis=1)[:, np.newaxis]
+        frames -= frames.mean(dim=1, keepdim=True)
+        frames /= frames.std(dim=1, keepdim=True)
 
-        frames = torch.tensor(frames)
-        if self.device == "cuda":
-            frames = frames.cuda()
-        
+        frames = frames.to(self.device)
+
         y = self.model(frames)
 
         if viterbi:
-            cents = to_viterbi_cents(y.cpu().detach().numpy())
+            cents = to_viterbi_cents(y.cpu().numpy())
         else:
-            cents = to_local_average_cents(y.cpu().detach().numpy())
-        
-        frequency = 10 * 2 ** (cents / 1200)
-        frequency[np.isnan(frequency)] = 0
+            cents = to_local_average_cents(y, fmin=fmin, fmax=fmax)
 
-        return frequency
+        frequency = 10 * 2 ** (cents / 1200)
+        frequency = frequency.nan_to_num(0)
+
+        confidence = y.max(axis=1).values
+        time = torch.arange(y.shape[0], dtype=frequency.dtype) * (step_size / 1000.0)
+
+        return time, frequency, confidence, y
 
 
 class ONNXTorchCrepePredictor:
